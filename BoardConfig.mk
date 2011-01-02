@@ -21,9 +21,16 @@ BOARD_PAGE_SIZE := 0x00000800
 
 TARGET_PREBUILT_KERNEL := device/bn/nookcolor/kernel
 
+# ignore boot and recovery
 BOARD_RECOVERY_IGNORE_BOOTABLES := true
 
+# custom recovery ui
+BOARD_CUSTOM_RECOVERY_KEYMAPPING := ../../device/bn/nookcolor/recovery/recovery_ui.c
+
+# we dont' have one of these
 BOARD_HAS_NO_MISC_PARTITION := true
+
+# partition scheme and options
 BOARD_SYSTEM_DEVICE := /dev/block/mmcblk0p5
 BOARD_SYSTEM_FILESYSTEM := ext2
 BOARD_SYSTEM_FILESYSTEM_OPTIONS := nocheck
