@@ -57,7 +57,12 @@ BOARD_RECOVERY_IGNORE_BOOTABLES := true
 BOARD_CUSTOM_RECOVERY_KEYMAPPING := ../../device/bn/encore/recovery/recovery_ui.c
 TARGET_RECOVERY_PRE_COMMAND := "dd if=/dev/zero of=/rom/bcb bs=64 count=1 > /dev/null 2>&1 ; echo 'recovery' >> /rom/bcb ; sync"
 
-BOARD_USES_GENERIC_AUDIO := true
+# Testing audio stuff
+#BOARD_USES_GENERIC_AUDIO := false
+#BOARD_USES_ALSA_AUDIO := true
+#BOARD_WITH_ALSA_UTILS := true
+#BOARD_USES_TI_OMAP_MODEM_AUDIO := false
+#BOARD_USES_AUDIO_LEGACY := true
 
 # for now
 TARGET_NO_RECOVERY := true
@@ -105,9 +110,6 @@ BOARD_HAVE_BLUETOOTH := true
 BOARD_HAVE_FAKE_GPS := true
 
 USE_CAMERA_STUB := true
-#BOARD_USES_ALSA_AUDIO := true
-#BUILD_WITH_ALSA_UTILS := true
-BOARD_USES_TI_OMAP_MODEM_AUDIO := false
 BOARD_HAS_NO_MISC_PARTITION := true
 
 ifdef HARDWARE_OMX

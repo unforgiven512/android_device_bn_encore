@@ -108,6 +108,12 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     libreference-ril
 
+# Testing audio
+# XXX: We may add "audio.a2dp.default \" here
+PRODUCT_PACKAGES := \
+    audio.primary.omap3 \
+    libaudioutils
+
 # Use medium-density artwork where available
 PRODUCT_LOCALES += mdpi
 
