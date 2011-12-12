@@ -157,43 +157,32 @@ struct pcm_config pcm_config_mm = {
 //    char *strval;
 //};
 
-static int adev_open(const hw_module_t* module, const char* name,
-                     hw_device_t** device)
-{
-    struct omap3_audio_device *adev; // check this out
-    int ret;
-
-    if (strcmp(name, AUDIO_HARDWARE_INTERFACE) != 0)
-        return -EINVAL;
-
-    adev = calloc(1, sizeof(struct omap3_audio_device));
-    if (!adev)
-        return -ENOMEM;
-
-    adev->hw_device.common.tag = HARDWARE_DEVICE_TAG;
-    adev->hw_device.common.version = 0;
-    adev->hw_device.common.module = (struct hw_module_t *) module;
-    adev->hw_device.common.close = adev_close;
-
-    adev->mixer = mixer_open(0);
-    if (!adev->mixer) {
-        free(adev);
-        LOGE("Unable to open the mixer, aborting.");
-        return -EINVAL;
-    }
-
-    return 0;
-}
-
-static int adev_close(hw_device_t *device)
-{
-    free(device);
-    return 0;
-}
-
 // ----------------------------------------------------------------------------
 // - [START] REWRITE FOR TINYALSA BY GERAD MUNSCH
 // ----------------------------------------------------------------------------
+
+static uint32_t adev_get_supported_devices(const struct audio_hw_device *dev)
+{
+    return (/* OUT */
+            AUDIO_DEVICE_OUT_EARPIECE |
+            AUDIO_DEVICE_OUT_SPEAKER |
+            AUDIO_DEVICE_OUT_WIRED_HEADSET |
+            AUDIO_DEVICE_OUT_WIRED_HEADPHONE |
+            AUDIO_DEVICE_OUT_AUX_DIGITAL |
+            AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET |
+            AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET |
+            AUDIO_DEVICE_OUT_ALL_SCO |
+            AUDIO_DEVICE_OUT_DEFAULT |
+            /* IN */
+            AUDIO_DEVICE_IN_COMMUNICATION |
+            AUDIO_DEVICE_IN_AMBIENT |
+            AUDIO_DEVICE_IN_BUILTIN_MIC |
+            AUDIO_DEVICE_IN_WIRED_HEADSET |
+            AUDIO_DEVICE_IN_AUX_DIGITAL |
+            AUDIO_DEVICE_IN_BACK_MIC |
+            AUDIO_DEVICE_IN_ALL_SCO |
+            AUDIO_DEVICE_IN_DEFAULT);
+}
 
 static uint32_t out_get_sample_rate(const struct audio_stream *stream)
 {
@@ -243,6 +232,128 @@ static int start_output_stream(struct omap3_stream_out *out)
     return 0;
 }
 
+static int adev_init_check(const struct audio_hw_device *dev)
+{
+    return 0;
+}
+
+static void select_mode(struct omap3_audio_device *adev)
+{
+    // XXX: I STUBBED THIS BITCH OUT!
+
+    /*if (adev->mode == AUDIO_MODE_IN_CALL) {
+        LOGE("Entering IN_CALL state, in_call=%d", adev->in_call);
+        if (!adev->in_call) {
+            force_all_standby(adev);*/
+            /* force earpiece route for in call state if speaker is the
+            only currently selected route. This prevents having to tear
+            down the modem PCMs to change route from speaker to earpiece
+            after the ringtone is played, but doesn't cause a route
+            change if a headset or bt device is already connected. If
+            speaker is not the only thing active, just remove it from
+            the route. We'll assume it'll never be used initally during
+            a call. This works because we're sure that the audio policy
+            manager will update the output device after the audio mode
+            change, even if the device selection did not change. */
+            /*if ((adev->devices & AUDIO_DEVICE_OUT_ALL) == AUDIO_DEVICE_OUT_SPEAKER)
+                adev->devices = AUDIO_DEVICE_OUT_EARPIECE |
+                                AUDIO_DEVICE_IN_BUILTIN_MIC;
+            else
+                adev->devices &= ~AUDIO_DEVICE_OUT_SPEAKER;
+            select_output_device(adev);
+            start_call(adev);
+            ril_set_call_clock_sync(&adev->ril, SOUND_CLOCK_START);
+            adev_set_voice_volume(&adev->hw_device, adev->voice_volume);
+            adev->in_call = 1;
+        }
+    } else {
+        LOGE("Leaving IN_CALL state, in_call=%d, mode=%d",
+             adev->in_call, adev->mode);
+        if (adev->in_call) {
+            adev->in_call = 0;
+            end_call(adev);
+            force_all_standby(adev);
+            select_output_device(adev);
+            select_input_device(adev);
+        }
+    }*/
+}
+
+static int adev_set_master_volume(struct audio_hw_device *dev, float volume)
+{
+    return -ENOSYS;
+}
+
+// XXX: MAY NOT BE NEEDED
+static int adev_set_mode(struct audio_hw_device *dev, int mode)
+{
+    struct omap3_audio_device *adev = (struct omap3_audio_device *)dev;
+
+    pthread_mutex_lock(&adev->lock);
+    if (adev->mode != mode) {
+        adev->mode = mode;
+        select_mode(adev);
+    }
+    pthread_mutex_unlock(&adev->lock);
+
+    return 0;
+}
+
+/*****************************************************************************
+ * ALSA device open and close functions                                      *
+ *****************************************************************************/
+
+static int adev_open(const hw_module_t* module, const char* name,
+                     hw_device_t** device)
+{
+    struct omap3_audio_device *adev; // check this out
+    int ret;
+
+    if (strcmp(name, AUDIO_HARDWARE_INTERFACE) != 0)
+        return -EINVAL;
+
+    adev = calloc(1, sizeof(struct omap3_audio_device));
+    if (!adev)
+        return -ENOMEM;
+
+    adev->hw_device.common.tag = HARDWARE_DEVICE_TAG;
+    adev->hw_device.common.version = 0;
+    adev->hw_device.common.module = (struct hw_module_t *) module;
+    adev->hw_device.common.close = adev_close;
+
+    adev->hw_device.get_supported_devices = adev_get_supported_devices;
+    adev->hw_device.init_check = adev_init_check;
+    //adev->hw_device.set_voice_volume = adev_set_voice_volume;
+    adev->hw_device.set_master_volume = adev_set_master_volume;
+    adev->hw_device.set_mode = adev_set_mode;
+    //adev->hw_device.set_mic_mute = adev_set_mic_mute;
+    //adev->hw_device.get_mic_mute = adev_get_mic_mute;
+    //adev->hw_device.set_parameters = adev_set_parameters;
+    //adev->hw_device.get_parameters = adev_get_parameters;
+    //adev->hw_device.get_input_buffer_size = adev_get_input_buffer_size;
+    //adev->hw_device.open_output_stream = adev_open_output_stream;
+    //adev->hw_device.close_output_stream = adev_close_output_stream;
+    //adev->hw_device.open_input_stream = adev_open_input_stream;
+    //adev->hw_device.close_input_stream = adev_close_input_stream;
+    //adev->hw_device.dump = adev_dump;
+
+    adev->mixer = mixer_open(0);
+    if (!adev->mixer) {
+        free(adev);
+        LOGE("Unable to open the mixer, aborting.");
+        return -EINVAL;
+    }
+
+    *device = &adev->hw_device.common;
+
+    return 0;
+}
+
+static int adev_close(hw_device_t *device)
+{
+    free(device);
+    return 0;
+}
 
 // ----------------------------------------------------------------------------
 // - [END] REWRITE FOR TINYALSA BY GERAD MUNSCH
