@@ -103,7 +103,7 @@
 struct pcm_config pcm_config_mm = {
     .channels = 2,
     .rate = MM_FULL_POWER_SAMPLING_RATE,
-    .period_size = LONG_PEROID_SIZE,
+    .period_size = LONG_PERIOD_SIZE,
     .period_count = PLAYBACK_LONG_PERIOD_COUNT,
     .format = PCM_FORMAT_S16_LE,
 };
