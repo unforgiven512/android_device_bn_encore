@@ -60,6 +60,32 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
 /* defines for "audio_hw.c" / tinyalsa config */
+//* mixer control names
+// volume
+#define MIXER_HEADSET_PLAYBACK_VOLUME           "HP Analog Volume"
+#define MIXER_HANDSFREE_PLAYBACK_VOLUME         "SPKR Analog Volume"
+
+// headset
+#define MIXER_HS_LEFT_PLAYBACK                  "HPL Output Mixer"
+#define MIXER_HS_RIGHT_PLAYBACK                 "HPR Output Mixer"
+// speaker
+#define MIXER_HF_LEFT_PLAYBACK                  "LOL Output Mixer"
+#define MIXER_HF_RIGHT_PLAYBACK                 "LOR Output Mixer"
+// headphone enable switch
+//#define MIXER_EARPHONE_ENABLE_SWITCH            
+
+//* mixer contol gain and route values
+// headset
+#define MIXER_PLAYBACK_HS_LEFT_DAC              "Left DAC"
+#define MIXER_PLAYBACK_HS_RIGHT_DAC             "Right DAC"
+// speaker
+#define MIXER_PLAYBACK_HF_LEFT_DAC              "Left DAC"
+#define MIXER_PLAYBACK_HF_RIGHT_DAC             "Right DAC"
+
+// mixer stuff FIXME: COMBINE INTO ABOVE SECTION
+#define MIXER_ABE_GAIN_0DB                      120
+
+// sampling rates
 #define DEFAULT_OUT_SAMPLING_RATE 44100
 #define MM_FULL_POWER_SAMPLING_RATE 48000
 
@@ -72,6 +98,16 @@
 #define PORT_IN 1
 #define PORT_PCM 2
 #define PORT_FM 3
+
+// dB conversions
+#define DB_FROM_SPEAKER_VOLUME(x) ((x) * 2 - 52)
+#define DB_TO_HEADSET_VOLUME(x) (((x) + 30) / 2)
+#define DB_TO_SPEAKER_VOLUME(x) (((x) + 52) / 2)
+
+// volume levels
+#define NORMAL_SPEAKER_VOLUME_OMAP3 4
+#define NORMAL_HEADSET_VOLUME_OMAP3 -12
+#define NORMAL_HEADPHONE_VOLUME_OMAP3 -6 // allow louder output for headphones
 
 // misc
 /* constraint imposed by ABE: all period sizes must be multiples of 24 */
@@ -108,17 +144,86 @@ struct pcm_config pcm_config_mm = {
     .format = PCM_FORMAT_S16_LE,
 };
 
+struct route_setting
+{
+    char *ctl_name;
+    int intval;
+    char *strval;
+};
+
+/* 
+ * ROUTE SETTINGS
+ * XXX: THESE VALUES SHOULD NOT CHANGE
+ */
+
+struct route_setting defaults[] = {
+    {
+        .ctl_name = NULL,
+    },
+};
+
+/* hands-free (speaker) output */
+struct route_setting hf_output[] = {
+    /*{
+        .ctl_name = "Left Playback",
+        .strval = "Left DAC",
+    },
+    {
+        .ctl_name = "Right Playback",
+        .strval = "Right DAC",
+    },*/
+    {
+        .ctl_name = "SPKR Analog",
+        .strval = "LO DAC",
+    },
+    {
+        .ctl_name = "LO DAC Playback Switch",
+        .intval = 1,
+    },
+    {
+        .ctl_name = NULL,
+    },
+};
+
+/* headphone/headset output */
+struct route_setting hs_output[] = {
+    /*{
+        .ctl_name = "HandsfreeR Mux",
+        .strval = "AudioR2",
+    },
+    {
+        .ctl_name = "HandsfreeL Mux",
+        .strval = "AudioL2",
+    },
+    {
+        .ctl_name = "HP DAC Playback Switch",
+        .intval = 1,
+    },*/
+    {
+        .ctl_name = NULL,
+    },
+};
+
+struct mixer_ctls
+{
+    struct mixer_ctl *headset_volume;
+    struct mixer_ctl *speaker_volume;
+};
+
 struct omap3_audio_device {
     struct audio_hw_device hw_device;
 
     pthread_mutex_t lock;   // see note below on mutex acquisition order
 
     struct mixer *mixer;
-    //struct mixer_ctls mixer_ctls;
+    struct mixer_ctls mixer_ctls;
     int mode;
     int devices;
 
     struct omap3_stream_out *active_output;
+    bool mic_mute;
+
+    bool bluetooth_nrec;
 
     bool low_power;
 };
@@ -137,40 +242,102 @@ struct omap3_stream_out {
     bool low_power;
 };
 
+static void select_output_device(struct omap3_audio_device *adev);
 
+/* The enable flag when 0 makes the assumption that enums are disabled by
+ * "Off" and integers/booleans by 0 */
+static int set_route_by_array(struct mixer *mixer, struct route_setting *route,
+                              int enable)
+{
+    LOGD("DEBUG: Entered set_route_by_array()");
+    struct mixer_ctl *ctl;
+    unsigned int i, j;
 
-//struct route_setting
-//{
-//    char *ctl_name;
-//    int intval;
-//    char *strval;
-//};
+    /* Go through the route array and set each value */
+    i = 0;
+    while (route[i].ctl_name) {
+        ctl = mixer_get_ctl_by_name(mixer, route[i].ctl_name);
+        if (!ctl)
+            LOGE("DEBUG: ERROR in set_route_by_array() -- ctl is invalid");
+            LOGE("DEBUG: route[%s].ctl_name = '%s'", i, route[i].ctl_name);
+            return -EINVAL;
+
+        if (route[i].strval) {
+            if (enable)
+                mixer_ctl_set_enum_by_string(ctl, route[i].strval);
+            else
+                mixer_ctl_set_enum_by_string(ctl, "Off");
+        } else {
+            /* This ensures multiple (i.e. stereo) values are set jointly */
+            for (j = 0; j < mixer_ctl_get_num_values(ctl); j++) {
+                if (enable)
+                    mixer_ctl_set_value(ctl, j, route[i].intval);
+                else
+                    mixer_ctl_set_value(ctl, j, 0);
+            }
+        }
+        LOGD("DEBUG: OK! route[%s].ctl_name = '%s'", i, route[i].ctl_name);
+        i++;
+    }
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: set_route_by_array() complete!");
+
+    return 0;
+}
+
 
 // ----------------------------------------------------------------------------
 // - [START] REWRITE FOR TINYALSA BY GERAD MUNSCH
 // ----------------------------------------------------------------------------
 
-
-
-/*static uint32_t out_get_sample_rate(const struct audio_stream *stream)
+static void set_output_volumes(struct omap3_audio_device *adev)
 {
-    return DEFAULT_OUT_SAMPLING_RATE;
-}*/
+    // FIXME: THIS SHIT NEEDS FIXED
+    unsigned int channel;
+    int speaker_volume;
+    int headset_volume;
+    int headphone_on = adev->devices & AUDIO_DEVICE_OUT_WIRED_HEADPHONE;
+    int speaker_on = adev->devices & AUDIO_DEVICE_OUT_SPEAKER;
+    int speaker_volume_overrange = MIXER_ABE_GAIN_0DB;
+    int speaker_max_db =
+        DB_FROM_SPEAKER_VOLUME(mixer_ctl_get_range_max(adev->mixer_ctls.speaker_volume));
+    //struct mixer_ctl *mixer_ctl_overrange = adev->mixer_ctls.mm_dl2_volume;
 
-/*static uint32_t out_get_channels(const struct audio_stream *stream)
-{
-    return AUDIO_CHANNEL_OUT_STEREO;
-}*/
+    // since we're not a phone, I'm just going to set up media volumes here for now...
+    speaker_volume = NORMAL_SPEAKER_VOLUME_OMAP3;
+    if (headphone_on)
+        headset_volume = NORMAL_HEADPHONE_VOLUME_OMAP3;
+    else
+        headset_volume = NORMAL_HEADSET_VOLUME_OMAP3;
 
-/*static int out_get_format(const struct audio_stream *stream)
-{
-    return AUDIO_FORMAT_PCM_16_BIT;
-}*/
+    //if (adev->mode == AUDIO_MODE_RINGTONE)
+        //headset_volume += RINGTONE_HEADSET_VOLUME_OFFSET;
 
-/*static int out_set_format(struct audio_stream *stream, int format)
-{
-    return 0;
-}*/
+    /* If we have run out of range in the codec (analog) speaker volume,
+       we have to apply the remainder of the dB increase to the DL2
+       media/voice mixer volume, which is a digital gain */
+    if (speaker_volume > speaker_max_db) {
+        speaker_volume_overrange += (speaker_volume - speaker_max_db);
+        speaker_volume = speaker_max_db;
+    }
+
+    for (channel = 0; channel < 2; channel++) {
+        mixer_ctl_set_value(adev->mixer_ctls.speaker_volume, channel,
+            DB_TO_SPEAKER_VOLUME(speaker_volume));
+        mixer_ctl_set_value(adev->mixer_ctls.headset_volume, channel,
+            DB_TO_HEADSET_VOLUME(headset_volume));
+    }
+
+    //if (speaker_on)
+        //mixer_ctl_set_value(mixer_ctl_overrange, 0, speaker_volume_overrange);
+    //else
+        //mixer_ctl_set_value(mixer_ctl_overrange, 0, MIXER_ABE_GAIN_0DB);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: set_output_volumes() complete!");
+
+}
 
 static int start_output_stream(struct omap3_stream_out *out)
 {
@@ -197,11 +364,9 @@ static int start_output_stream(struct omap3_stream_out *out)
 
     out->resampler->reset(out->resampler);
 
-    return 0;
-}
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: start_output_stream() complete!");
 
-static int adev_init_check(const struct audio_hw_device *dev)
-{
     return 0;
 }
 
@@ -245,10 +410,44 @@ static void select_mode(struct omap3_audio_device *adev)
             select_input_device(adev);
         }
     }*/
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: select_mode() (STUB) complete!");
+
+}
+
+static void select_output_device(struct omap3_audio_device *adev)
+{
+    int headset_on;
+    int headphone_on;
+    int speaker_on;
+    int bt_on;
+    unsigned int channel;
+
+    headset_on = adev->devices & AUDIO_DEVICE_OUT_WIRED_HEADSET;
+    headphone_on = adev->devices & AUDIO_DEVICE_OUT_WIRED_HEADPHONE;
+    speaker_on = adev->devices & AUDIO_DEVICE_OUT_SPEAKER;
+    bt_on = adev->devices & AUDIO_DEVICE_OUT_ALL_SCO;
+
+    // mixer_ctl_set_value stuff
+
+    // set_route_by_array stuff
+    set_route_by_array(adev->mixer, hs_output, headset_on | headphone_on);
+    set_route_by_array(adev->mixer, hf_output, speaker_on);
+
+    //set_eq_filter(adev);
+    set_output_volumes(adev);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: select_output_device() complete!");
+
 }
 
 static int adev_set_master_volume(struct audio_hw_device *dev, float volume)
 {
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_set_master_volume() complete!");
+
     return -ENOSYS;
 }
 
@@ -264,16 +463,53 @@ static int adev_set_mode(struct audio_hw_device *dev, int mode)
     }
     pthread_mutex_unlock(&adev->lock);
 
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_set_mode() complete!");
+
+    return 0;
+}
+
+static int adev_set_mic_mute(struct audio_hw_device *dev, bool state)
+{
+    struct omap3_audio_device *adev = (struct omap3_audio_device *)dev;
+
+    adev->mic_mute = state;
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_set_mic_mute() complete!");
+
+    return 0;
+}
+
+static int adev_get_mic_mute(const struct audio_hw_device *dev, bool *state)
+{
+    LOGD("DEBUG: adev_get_mic_mute() begin!");
+
+    struct omap3_audio_device *adev = (struct omap3_audio_device *)dev;
+
+    //*state = adev->mic_mute;
+    *state = false;
+
+    /* XXX | DEBUG | XXX */
+    LOGI("DEBUG: adev_get_mic_mute() OVERRIDE -- FALSE");
+    LOGD("DEBUG: adev_get_mic_mute() complete!");
+
     return 0;
 }
 
 static uint32_t out_get_sample_rate(const struct audio_stream *stream)
 {
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_sample_rate() complete!");
+
     return DEFAULT_OUT_SAMPLING_RATE;
 }
 
 static int out_set_sample_rate(struct audio_stream *stream, uint32_t rate)
 {
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_set_sample_rate() complete!");
+
     return 0;
 }
 
@@ -283,21 +519,37 @@ static size_t out_get_buffer_size(const struct audio_stream *stream)
 
     size_t size = (SHORT_PERIOD_SIZE * DEFAULT_OUT_SAMPLING_RATE) / out->config.rate;
     size = ((size + 15) / 16) * 16;
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_buffer_size() complete!");
+
     return size * audio_stream_frame_size((struct audio_stream *)stream);
 }
 
 static uint32_t out_get_channels(const struct audio_stream *stream)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_channels() complete!");
+
     return AUDIO_CHANNEL_OUT_STEREO;
 }
 
 static int out_get_format(const struct audio_stream *stream)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_format() complete!");
+
     return AUDIO_FORMAT_PCM_16_BIT;
 }
 
 static int out_set_format(struct audio_stream *stream, int format)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_set_format() complete!");
+
     return 0;
 }
 
@@ -327,8 +579,16 @@ static int do_output_standby(struct omap3_stream_out *out)
             //out->echo_reference = NULL;
         //}
 
+        // turn off outputs
+        set_route_by_array(adev->mixer, hs_output, 0);
+        set_route_by_array(adev->mixer, hf_output, 0);
+
         out->standby = 1;
     }
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: do_output_standby() complete!");
+
     return 0;
 }
 
@@ -342,11 +602,19 @@ static int out_standby(struct audio_stream *stream)
     status = do_output_standby(out);
     pthread_mutex_unlock(&out->lock);
     pthread_mutex_unlock(&out->dev->lock);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_standby() complete!");
+
     return status;
 }
 
 static int out_dump(const struct audio_stream *stream, int fd)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_dump() complete!");
+
     return 0;
 }
 
@@ -397,11 +665,19 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
     }
 
     str_parms_destroy(parms);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_set_parameters() complete!");
+
     return ret;
 }
 
 static char * out_get_parameters(const struct audio_stream *stream, const char *keys)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_parameters() complete!");
+
     return strdup("");
 }
 
@@ -409,12 +685,19 @@ static uint32_t out_get_latency(const struct audio_stream_out *stream)
 {
     struct omap3_stream_out *out = (struct omap3_stream_out *)stream;
 
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_get_latency() complete!");
+
     return (SHORT_PERIOD_SIZE * PLAYBACK_SHORT_PERIOD_COUNT * 1000) / out->config.rate;
 }
 
 static int out_set_volume(struct audio_stream_out *stream, float left,
                           float right)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_set_volume() complete!");
+
     return -ENOSYS;
 }
 
@@ -526,6 +809,9 @@ exit:
         pthread_mutex_unlock(&adev->lock);
     }*/
 
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: out_write() complete!");
+
     return bytes;
 }
 
@@ -588,6 +874,10 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
     *sample_rate = out_get_sample_rate(&out->stream.common);
 
     *stream_out = &out->stream;
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_open_output_stream() complete!");
+
     return 0;
 
 err_open:
@@ -596,8 +886,105 @@ err_open:
     return ret;
 }
 
+static void adev_close_output_stream(struct audio_hw_device *dev,
+                                     struct audio_stream_out *stream)
+{
+    struct omap3_stream_out *out = (struct omap3_stream_out *)stream;
+
+    out_standby(&stream->common);
+    if (out->buffer)
+        free(out->buffer);
+    if (out->resampler)
+        release_resampler(out->resampler);
+    free(stream);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_close_output_stream() complete!");
+
+}
+
+static int adev_set_parameters(struct audio_hw_device *dev, const char *kvpairs)
+{
+    struct omap3_audio_device *adev = (struct omap3_audio_device *)dev;
+    struct str_parms *parms;
+    char *str;
+    char value[32];
+    int ret;
+
+    parms = str_parms_create_str(kvpairs);
+    /*ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_TTY_MODE, value, sizeof(value));
+    if (ret >= 0) {
+        int tty_mode;
+
+        if (strcmp(value, AUDIO_PARAMETER_VALUE_TTY_OFF) == 0)
+            tty_mode = TTY_MODE_OFF;
+        else if (strcmp(value, AUDIO_PARAMETER_VALUE_TTY_VCO) == 0)
+            tty_mode = TTY_MODE_VCO;
+        else if (strcmp(value, AUDIO_PARAMETER_VALUE_TTY_HCO) == 0)
+            tty_mode = TTY_MODE_HCO;
+        else if (strcmp(value, AUDIO_PARAMETER_VALUE_TTY_FULL) == 0)
+            tty_mode = TTY_MODE_FULL;
+        else
+            return -EINVAL;
+
+        pthread_mutex_lock(&adev->lock);
+        if (tty_mode != adev->tty_mode) {
+            adev->tty_mode = tty_mode;
+            if (adev->mode == AUDIO_MODE_IN_CALL)
+                select_output_device(adev);
+        }
+        pthread_mutex_unlock(&adev->lock);
+    }*/
+
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_BT_NREC, value, sizeof(value));
+    if (ret >= 0) {
+        if (strcmp(value, AUDIO_PARAMETER_VALUE_ON) == 0)
+            adev->bluetooth_nrec = true;
+        else
+            adev->bluetooth_nrec = false;
+    }
+
+    ret = str_parms_get_str(parms, "screen_state", value, sizeof(value));
+    if (ret >= 0) {
+        if (strcmp(value, AUDIO_PARAMETER_VALUE_ON) == 0)
+            adev->low_power = false;
+        else
+            adev->low_power = true;
+    }
+
+    str_parms_destroy(parms);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_set_parameters() complete!");
+
+    return ret;
+}
+
+static char * adev_get_parameters(const struct audio_hw_device *dev,
+                                  const char *keys)
+{
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_get_parameters() complete!");
+
+    return strdup("");
+}
+
+static int adev_init_check(const struct audio_hw_device *dev)
+{
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_init_check() complete!");
+
+    return 0;
+}
+
 static int adev_dump(const audio_hw_device_t *device, int fd)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_dump() complete!");
+
     return 0;
 }
 
@@ -608,11 +995,19 @@ static int adev_dump(const audio_hw_device_t *device, int fd)
 static int adev_close(hw_device_t *device)
 {
     free(device);
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_close() complete!");
+
     return 0;
 }
 
 static uint32_t adev_get_supported_devices(const struct audio_hw_device *dev)
 {
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_get_supported_devices() complete!");
+
     return (/* OUT */
             AUDIO_DEVICE_OUT_EARPIECE |
             AUDIO_DEVICE_OUT_SPEAKER |
@@ -657,16 +1052,16 @@ static int adev_open(const hw_module_t* module, const char* name,
     //adev->hw_device.set_voice_volume = adev_set_voice_volume;
     adev->hw_device.set_master_volume = adev_set_master_volume;
     adev->hw_device.set_mode = adev_set_mode;
-    //adev->hw_device.set_mic_mute = adev_set_mic_mute;
-    //adev->hw_device.get_mic_mute = adev_get_mic_mute;
-    //adev->hw_device.set_parameters = adev_set_parameters;
-    //adev->hw_device.get_parameters = adev_get_parameters;
+    adev->hw_device.set_mic_mute = adev_set_mic_mute;
+    adev->hw_device.get_mic_mute = adev_get_mic_mute;
+    adev->hw_device.set_parameters = adev_set_parameters;
+    adev->hw_device.get_parameters = adev_get_parameters;
     //adev->hw_device.get_input_buffer_size = adev_get_input_buffer_size;
-    //adev->hw_device.open_output_stream = adev_open_output_stream;
-    //adev->hw_device.close_output_stream = adev_close_output_stream;
+    adev->hw_device.open_output_stream = adev_open_output_stream;
+    adev->hw_device.close_output_stream = adev_close_output_stream;
     //adev->hw_device.open_input_stream = adev_open_input_stream;
     //adev->hw_device.close_input_stream = adev_close_input_stream;
-    //adev->hw_device.dump = adev_dump;
+    adev->hw_device.dump = adev_dump;
 
     adev->mixer = mixer_open(0);
     if (!adev->mixer) {
@@ -675,7 +1070,32 @@ static int adev_open(const hw_module_t* module, const char* name,
         return -EINVAL;
     }
 
+    adev->mixer_ctls.headset_volume = mixer_get_ctl_by_name(adev->mixer,
+                                           MIXER_HEADSET_PLAYBACK_VOLUME);
+    adev->mixer_ctls.speaker_volume = mixer_get_ctl_by_name(adev->mixer,
+                                           MIXER_HANDSFREE_PLAYBACK_VOLUME);
+
+    if (!adev->mixer_ctls.headset_volume || !adev->mixer_ctls.speaker_volume)
+    {
+        mixer_close(adev->mixer);
+        free(adev);
+        LOGE("Unable to locate all mixer controls, aborting.");
+        return -EINVAL;
+    }
+
+    /* Set the default route before the PCM stream is opened */
+    pthread_mutex_lock(&adev->lock);
+    set_route_by_array(adev->mixer, defaults, 1); // may need to change something here...
+    adev->mode = AUDIO_MODE_NORMAL;
+    adev->devices = AUDIO_DEVICE_OUT_SPEAKER | AUDIO_DEVICE_IN_BUILTIN_MIC;
+    select_output_device(adev);
+
+    adev->bluetooth_nrec = true;
+
     *device = &adev->hw_device.common;
+
+    /* XXX | DEBUG | XXX */
+    LOGD("DEBUG: adev_open() complete!");
 
     return 0;
 }
